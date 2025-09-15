@@ -1,9 +1,15 @@
-import React from "react";
-import Routes from "./Routes";
+import React from 'react';
+import { AuthProvider } from './contexts/AuthContext';
+import Routes from './Routes';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function App() {
   return (
-    <Routes />
+    <ErrorBoundary>
+      <AuthProvider>
+        <Routes />
+      </AuthProvider>
+    </ErrorBoundary>
   );
 }
 

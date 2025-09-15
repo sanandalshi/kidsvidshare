@@ -1,358 +1,375 @@
-import React, { useState, useContext, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { UserContext } from '../../components/ui/Header';
-import Header from '../../components/ui/Header';
-import UploadProgressOverlay from '../../components/ui/UploadProgressOverlay';
-import Icon from '../../components/AppIcon';
-import Button from '../../components/ui/Button';
-
-// Import page components
+import { useAuth } from '../../contexts/AuthContext';
+import { videoService, videoStorageService } from '../../services/videoService';
 import UploadDropZone from './components/UploadDropZone';
-import FileFormatGuide from './components/FileFormatGuide';
 import VideoMetadataEditor from './components/VideoMetadataEditor';
 import ParentalSupervisionPanel from './components/ParentalSupervisionPanel';
+import FileFormatGuide from './components/FileFormatGuide';
+import Button from '../../components/ui/Button';
+import Icon from '../../components/AppIcon';
 
 const VideoUploadPage = () => {
   const navigate = useNavigate();
-  const { userType, safetyStatus } = useContext(UserContext);
+  const { user, userProfile } = useAuth();
   
-  // Upload states
-  const [selectedFiles, setSelectedFiles] = useState([]);
-  const [currentFileIndex, setCurrentFileIndex] = useState(0);
+  const [uploadStep, setUploadStep] = useState('select'); // select, uploading, metadata, processing
+  const [selectedFile, setSelectedFile] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadComplete, setUploadComplete] = useState(false);
-  const [showMetadataEditor, setShowMetadataEditor] = useState(false);
-  const [videoMetadata, setVideoMetadata] = useState({});
-  const [approvalStatus, setApprovalStatus] = useState('pending');
+  const [error, setError] = useState(null);
+  const [videoData, setVideoData] = useState({
+    title: '',
+    description: '',
+    category: 'educational',
+    contentRating: 'all_ages',
+    tags: []
+  });
+  const [thumbnailFile, setThumbnailFile] = useState(null);
+  const [uploadedPaths, setUploadedPaths] = useState({
+    videoPath: null,
+    thumbnailPath: null
+  });
 
-  // Error and validation states
-  const [uploadErrors, setUploadErrors] = useState([]);
-  const [showProgressOverlay, setShowProgressOverlay] = useState(false);
+  // Check if user can upload videos
+  const canUpload = userProfile?.role === 'parent' || 
+                   userProfile?.role === 'admin' || 
+                   (userProfile?.role === 'child' && userProfile?.parental_controls?.upload_enabled === true);
 
-  // Mock upload simulation
-  const simulateUpload = async (file) => {
-    setIsUploading(true);
-    setShowProgressOverlay(true);
-    setUploadProgress(0);
-    setUploadErrors([]);
+  if (!user) {
+    navigate('/login');
+    return null;
+  }
 
-    // Simulate upload progress
-    const progressInterval = setInterval(() => {
-      setUploadProgress(prev => {
-        if (prev >= 95) {
-          clearInterval(progressInterval);
-          return 95;
-        }
-        return prev + Math.random() * 15;
-      });
-    }, 200);
+  if (!canUpload) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center max-w-md mx-auto px-4">
+          <Icon name="Lock" size={64} className="text-warning mx-auto mb-4" />
+          <h2 className="text-xl font-heading font-bold text-foreground mb-2">
+            Upload Restricted
+          </h2>
+          <p className="text-text-secondary font-caption mb-6">
+            You don't have permission to upload videos. Please contact a parent or administrator.
+          </p>
+          <Button
+            onClick={() => navigate('/video-gallery')}
+            iconName="ArrowLeft"
+            iconPosition="left"
+          >
+            Back to Gallery
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
-    // Simulate upload completion after 3 seconds
-    setTimeout(() => {
-      clearInterval(progressInterval);
-      setUploadProgress(100);
-      setIsUploading(false);
-      setUploadComplete(true);
-      
-      // Show metadata editor after upload
-      setTimeout(() => {
-        setShowMetadataEditor(true);
-      }, 1000);
-    }, 3000);
+  const handleFileSelect = (file) => {
+    setSelectedFile(file);
+    setVideoData(prev => ({
+      ...prev,
+      title: file?.name?.replace(/\.[^/.]+$/, '') // Remove file extension
+    }));
+    setUploadStep('metadata');
+    setError(null);
   };
 
-  const handleFilesSelected = (files) => {
-    // Validate files
-    const validFiles = [];
-    const errors = [];
+  const handleThumbnailSelect = (file) => {
+    setThumbnailFile(file);
+  };
 
-    files?.forEach(file => {
-      // Check file type
-      if (!file?.type?.startsWith('video/')) {
-        errors?.push(`${file?.name} is not a video file`);
-        return;
-      }
+  const validateVideoFile = (file) => {
+    const maxSize = 500 * 1024 * 1024; // 500MB
+    const allowedTypes = ['video/mp4', 'video/webm', 'video/quicktime', 'video/ogg'];
 
-      // Check file size (500MB limit)
-      const maxSize = 500 * 1024 * 1024; // 500MB in bytes
-      if (file?.size > maxSize) {
-        errors?.push(`${file?.name} is too large (max 500MB)`);
-        return;
-      }
+    if (file?.size > maxSize) {
+      throw new Error('Video file must be smaller than 500MB');
+    }
 
-      // Check video duration (would need video element in real app)
-      validFiles?.push(file);
-    });
+    if (!allowedTypes?.includes(file?.type)) {
+      throw new Error('Only MP4, WebM, QuickTime and OGG video files are allowed');
+    }
+  };
 
-    if (errors?.length > 0) {
-      setUploadErrors(errors);
+  const handleUpload = async () => {
+    if (!selectedFile || !videoData?.title?.trim()) {
+      setError('Please provide a title and select a video file');
       return;
     }
 
-    setSelectedFiles(validFiles);
-    setCurrentFileIndex(0);
-    
-    // Start upload simulation for first file
-    if (validFiles?.length > 0) {
-      simulateUpload(validFiles?.[0]);
-    }
-  };
+    try {
+      validateVideoFile(selectedFile);
+      setUploadStep('uploading');
+      setError(null);
 
-  const handleMetadataChange = (metadata) => {
-    setVideoMetadata(metadata);
-  };
-
-  const handleMetadataSave = (metadata) => {
-    setVideoMetadata(metadata);
-    setShowMetadataEditor(false);
-    
-    // In a real app, this would save to backend
-    console.log('Saving video metadata:', metadata);
-    
-    // Show success message and redirect
-    setTimeout(() => {
-      navigate('/video-gallery', { 
-        state: { 
-          message: userType === 'child' ?'Your awesome video has been uploaded! 🎉' :'Video uploaded successfully!',
-          uploadedVideo: {
-            ...metadata,
-            file: selectedFiles?.[currentFileIndex],
-            uploadDate: new Date()?.toISOString(),
-            status: approvalStatus
-          }
+      // Upload video file
+      setUploadProgress(20);
+      const videoUpload = await videoStorageService?.uploadVideo(
+        selectedFile, 
+        user?.id,
+        (progress) => {
+          setUploadProgress(20 + (progress * 0.6)); // 20% to 80%
         }
+      );
+
+      // Upload thumbnail if provided
+      let thumbnailUpload = null;
+      if (thumbnailFile) {
+        setUploadProgress(80);
+        thumbnailUpload = await videoStorageService?.uploadThumbnail(thumbnailFile, user?.id);
+      }
+
+      setUploadProgress(90);
+
+      // Get video duration (mock - in production you'd use video metadata)
+      const videoDuration = await getVideoDuration(selectedFile);
+
+      // Create video record in database
+      const newVideo = await videoService?.createVideo({
+        title: videoData?.title?.trim(),
+        description: videoData?.description?.trim(),
+        uploaderId: user?.id,
+        filePath: videoUpload?.path,
+        thumbnailPath: thumbnailUpload?.path || null,
+        durationSeconds: Math.floor(videoDuration),
+        fileSizeBytes: selectedFile?.size,
+        mimeType: selectedFile?.type,
+        category: videoData?.category,
+        contentRating: videoData?.contentRating,
+        tags: videoData?.tags
       });
-    }, 1000);
-  };
 
-  const handleMetadataCancel = () => {
-    setShowMetadataEditor(false);
-    setSelectedFiles([]);
-    setUploadProgress(0);
-    setUploadComplete(false);
-    setShowProgressOverlay(false);
-  };
+      setUploadProgress(100);
+      setUploadStep('processing');
 
-  const handleUploadCancel = () => {
-    setIsUploading(false);
-    setSelectedFiles([]);
-    setUploadProgress(0);
-    setShowProgressOverlay(false);
-    setUploadErrors([]);
-  };
+      // Navigate to video gallery after short delay
+      setTimeout(() => {
+        navigate('/video-gallery');
+      }, 2000);
 
-  const handleUploadComplete = () => {
-    setShowProgressOverlay(false);
-  };
-
-  const handleApprovalChange = (status, notes) => {
-    setApprovalStatus(status);
-    console.log('Parental approval:', status, notes);
-  };
-
-  // Reset states when user type changes
-  useEffect(() => {
-    if (!isUploading) {
-      setSelectedFiles([]);
-      setUploadProgress(0);
-      setUploadComplete(false);
-      setShowMetadataEditor(false);
-      setShowProgressOverlay(false);
-      setUploadErrors([]);
+    } catch (err) {
+      setError(err?.message);
+      setUploadStep('metadata');
     }
-  }, [userType, isUploading]);
+  };
+
+  // Mock function to get video duration
+  const getVideoDuration = (file) => {
+    return new Promise((resolve) => {
+      const video = document.createElement('video');
+      video.preload = 'metadata';
+      video.onloadedmetadata = () => {
+        resolve(video.duration || 0);
+        URL.revokeObjectURL(video.src);
+      };
+      video.onerror = () => resolve(0);
+      video.src = URL.createObjectURL(file);
+    });
+  };
+
+  const handleMetadataChange = (field, value) => {
+    setVideoData(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  const handleBack = () => {
+    if (uploadStep === 'metadata') {
+      setUploadStep('select');
+      setSelectedFile(null);
+      setThumbnailFile(null);
+      setVideoData({
+        title: '',
+        description: '',
+        category: 'educational',
+        contentRating: 'all_ages',
+        tags: []
+      });
+    } else if (uploadStep === 'uploading' || uploadStep === 'processing') {
+      // Cannot go back during upload
+      return;
+    } else {
+      navigate('/video-gallery');
+    }
+  };
 
   return (
     <div className="min-h-screen bg-background">
-      <Header />
-      <main className="container mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Page Header */}
-        <div className="text-center mb-8">
-          <div className="w-20 h-20 mx-auto bg-gradient-to-br from-primary via-secondary to-accent rounded-full flex items-center justify-center mb-4 shadow-pronounced">
-            <Icon name="Upload" size={32} className="text-white" />
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-8">
+          <div>
+            <h1 className="text-2xl font-heading font-bold text-foreground">
+              Upload Video
+            </h1>
+            <p className="text-sm text-text-secondary font-caption mt-1">
+              Share your creative content with the community
+            </p>
           </div>
-          <h1 className={`font-heading text-foreground mb-2 ${
-            userType === 'child' ? 'text-4xl lg:text-5xl' : 'text-3xl lg:text-4xl'
-          }`}>
-            {userType === 'child' ? 'Share Your Amazing Videos! 🎬' : 'Upload Your Videos'}
-          </h1>
-          <p className={`font-caption text-text-secondary max-w-2xl mx-auto ${
-            userType === 'child' ? 'text-xl lg:text-2xl' : 'text-lg lg:text-xl'
-          }`}>
-            {userType === 'child' ? "Let's upload your awesome videos and share them with everyone! It's super easy and fun! ✨" : "Upload and share your child's videos safely with our kid-friendly platform."
-            }
-          </p>
+          
+          <Button
+            variant="outline"
+            onClick={handleBack}
+            iconName="ArrowLeft"
+            iconPosition="left"
+            disabled={uploadStep === 'uploading' || uploadStep === 'processing'}
+          >
+            Back
+          </Button>
         </div>
 
-        {/* Error Messages */}
-        {uploadErrors?.length > 0 && (
-          <div className="mb-6 p-4 bg-error/10 border border-error/20 rounded-xl">
-            <div className="flex items-start space-x-3">
-              <Icon name="AlertCircle" size={20} className="text-error flex-shrink-0 mt-1" />
-              <div>
-                <h4 className="font-caption font-medium text-error mb-2">
-                  {userType === 'child' ? 'Oops! Something went wrong! 😅' : 'Upload Errors'}
-                </h4>
-                <ul className="space-y-1">
-                  {uploadErrors?.map((error, index) => (
-                    <li key={index} className="text-sm font-caption text-error">
-                      • {error}
-                    </li>
-                  ))}
-                </ul>
+        {/* Upload Steps */}
+        <div className="mb-8">
+          <div className="flex items-center space-x-4">
+            <div className={`flex items-center space-x-2 ${
+              ['select', 'metadata', 'uploading', 'processing']?.includes(uploadStep) 
+                ? 'text-primary' : 'text-text-secondary'
+            }`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                ['select', 'metadata', 'uploading', 'processing']?.includes(uploadStep)
+                  ? 'bg-primary text-white' : 'bg-muted text-text-secondary'
+              }`}>
+                1
               </div>
+              <span className="text-sm font-medium">Select File</span>
+            </div>
+
+            <div className={`flex-1 h-0.5 ${
+              ['metadata', 'uploading', 'processing']?.includes(uploadStep)
+                ? 'bg-primary' : 'bg-muted'
+            }`}></div>
+
+            <div className={`flex items-center space-x-2 ${
+              ['metadata', 'uploading', 'processing']?.includes(uploadStep)
+                ? 'text-primary' : 'text-text-secondary'
+            }`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                ['metadata', 'uploading', 'processing']?.includes(uploadStep)
+                  ? 'bg-primary text-white' : 'bg-muted text-text-secondary'
+              }`}>
+                2
+              </div>
+              <span className="text-sm font-medium">Video Details</span>
+            </div>
+
+            <div className={`flex-1 h-0.5 ${
+              ['uploading', 'processing']?.includes(uploadStep)
+                ? 'bg-primary' : 'bg-muted'
+            }`}></div>
+
+            <div className={`flex items-center space-x-2 ${
+              ['uploading', 'processing']?.includes(uploadStep)
+                ? 'text-primary' : 'text-text-secondary'
+            }`}>
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
+                ['uploading', 'processing']?.includes(uploadStep)
+                  ? 'bg-primary text-white' : 'bg-muted text-text-secondary'
+              }`}>
+                3
+              </div>
+              <span className="text-sm font-medium">Upload</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Error Display */}
+        {error && (
+          <div className="mb-6 bg-error/10 border border-error/20 rounded-xl p-4">
+            <div className="flex items-center space-x-2">
+              <Icon name="AlertCircle" size={20} className="text-error flex-shrink-0" />
+              <p className="text-error">{error}</p>
             </div>
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Main Upload Area */}
-          <div className="lg:col-span-2 space-y-8">
-            {/* Upload Drop Zone */}
-            {!showMetadataEditor && (
-              <UploadDropZone
-                onFilesSelected={handleFilesSelected}
-                isUploading={isUploading}
+        {/* Content based on upload step */}
+        {uploadStep === 'select' && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div className="lg:col-span-2">
+              <UploadDropZone 
+                onFileSelect={handleFileSelect}
+                onFilesSelected={handleFileSelect}
+                isUploading={uploadStep === 'uploading'}
               />
-            )}
-
-            {/* Metadata Editor */}
-            {showMetadataEditor && selectedFiles?.length > 0 && (
-              <VideoMetadataEditor
-                videoFile={selectedFiles?.[currentFileIndex]}
-                onMetadataChange={handleMetadataChange}
-                onSave={handleMetadataSave}
-                onCancel={handleMetadataCancel}
-              />
-            )}
-
-            {/* File Format Guide */}
-            {!showMetadataEditor && (
+            </div>
+            <div className="lg:col-span-1">
               <FileFormatGuide />
-            )}
+            </div>
           </div>
+        )}
 
-          {/* Sidebar */}
-          <div className="space-y-6">
-            {/* Parental Supervision Panel */}
-            <ParentalSupervisionPanel
-              onApprovalChange={handleApprovalChange}
-            />
-
-            {/* Quick Actions */}
-            <div className="bg-surface rounded-2xl border border-border shadow-soft p-6">
-              <h3 className={`font-heading text-foreground mb-4 ${
-                userType === 'child' ? 'text-xl' : 'text-lg'
-              }`}>
-                {userType === 'child' ? 'Quick Actions! ⚡' : 'Quick Actions'}
-              </h3>
-              <div className="space-y-3">
+        {uploadStep === 'metadata' && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div className="lg:col-span-2">
+              <VideoMetadataEditor
+                videoData={videoData}
+                onChange={handleMetadataChange}
+                videoFile={selectedFile}
+                onMetadataChange={handleMetadataChange}
+                onSave={handleUpload}
+                onCancel={handleBack}
+                selectedFile={selectedFile}
+                thumbnailFile={thumbnailFile}
+                onThumbnailSelect={handleThumbnailSelect}
+              />
+              
+              <div className="mt-8">
                 <Button
-                  variant="outline"
-                  size="default"
-                  onClick={() => navigate('/video-gallery')}
-                  iconName="Grid3X3"
-                  iconPosition="left"
-                  iconSize={18}
+                  onClick={handleUpload}
                   fullWidth
-                  className="child-friendly-button justify-start"
-                >
-                  {userType === 'child' ? 'See My Videos' : 'View Gallery'}
-                </Button>
-                
-                <Button
-                  variant="outline"
-                  size="default"
-                  onClick={() => navigate('/video-player')}
-                  iconName="Play"
+                  size="lg"
+                  iconName="Upload"
                   iconPosition="left"
-                  iconSize={18}
-                  fullWidth
-                  className="child-friendly-button justify-start"
+                  disabled={!videoData?.title?.trim()}
                 >
-                  {userType === 'child' ? 'Watch Videos' : 'Video Player'}
+                  Upload Video
                 </Button>
+              </div>
+            </div>
+            
+            <div className="lg:col-span-1">
+              <ParentalSupervisionPanel 
+                userProfile={userProfile}
+                videoData={videoData}
+                onApprovalChange={() => {}}
+              />
+            </div>
+          </div>
+        )}
 
-                {userType === 'parent' && (
-                  <Button
-                    variant="outline"
-                    size="default"
-                    onClick={() => navigate('/parental-dashboard')}
-                    iconName="Shield"
-                    iconPosition="left"
-                    iconSize={18}
-                    fullWidth
-                    className="child-friendly-button justify-start"
-                  >
-                    Parent Dashboard
-                  </Button>
+        {(uploadStep === 'uploading' || uploadStep === 'processing') && (
+          <div className="max-w-lg mx-auto text-center">
+            <div className="bg-surface border border-border rounded-2xl p-8">
+              <div className="w-16 h-16 bg-primary/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                {uploadStep === 'uploading' ? (
+                  <Icon name="Upload" size={32} className="text-primary" />
+                ) : (
+                  <Icon name="Settings" size={32} className="text-primary animate-spin" />
                 )}
               </div>
-            </div>
+              
+              <h3 className="text-lg font-heading font-bold text-foreground mb-2">
+                {uploadStep === 'uploading' ? 'Uploading Video...' : 'Processing Video...'}
+              </h3>
+              
+              <p className="text-text-secondary font-caption mb-6">
+                {uploadStep === 'uploading' ? 'Please wait while your video is being uploaded' : 'Your video is being processed and will be available shortly'}
+              </p>
 
-            {/* Upload Tips */}
-            <div className="bg-gradient-to-br from-accent/10 to-warning/10 rounded-2xl border border-accent/20 p-6">
-              <div className="flex items-center space-x-3 mb-4">
-                <div className="w-10 h-10 bg-accent rounded-full flex items-center justify-center">
-                  <Icon name="Lightbulb" size={20} className="text-accent-foreground" />
-                </div>
-                <h3 className={`font-heading text-foreground ${
-                  userType === 'child' ? 'text-xl' : 'text-lg'
-                }`}>
-                  {userType === 'child' ? 'Super Tips! 💡' : 'Upload Tips'}
-                </h3>
+              <div className="w-full bg-muted rounded-full h-3 mb-4">
+                <div 
+                  className="bg-primary h-3 rounded-full transition-all duration-300"
+                  style={{ width: `${uploadProgress}%` }}
+                ></div>
               </div>
-              <ul className="space-y-2">
-                <li className={`flex items-start space-x-2 font-caption text-text-secondary ${
-                  userType === 'child' ? 'text-sm' : 'text-xs'
-                }`}>
-                  <Icon name="CheckCircle" size={14} className="text-success mt-0.5 flex-shrink-0" />
-                  <span>
-                    {userType === 'child' ?'Make sure your video is fun and safe!' :'Ensure content is age-appropriate'
-                    }
-                  </span>
-                </li>
-                <li className={`flex items-start space-x-2 font-caption text-text-secondary ${
-                  userType === 'child' ? 'text-sm' : 'text-xs'
-                }`}>
-                  <Icon name="CheckCircle" size={14} className="text-success mt-0.5 flex-shrink-0" />
-                  <span>
-                    {userType === 'child' ?'Keep videos under 10 minutes long' :'Maximum 10 minutes duration'
-                    }
-                  </span>
-                </li>
-                <li className={`flex items-start space-x-2 font-caption text-text-secondary ${
-                  userType === 'child' ? 'text-sm' : 'text-xs'
-                }`}>
-                  <Icon name="CheckCircle" size={14} className="text-success mt-0.5 flex-shrink-0" />
-                  <span>
-                    {userType === 'child' ?'Add a cool title and description!' :'Add descriptive titles and tags'
-                    }
-                  </span>
-                </li>
-                <li className={`flex items-start space-x-2 font-caption text-text-secondary ${
-                  userType === 'child' ? 'text-sm' : 'text-xs'
-                }`}>
-                  <Icon name="CheckCircle" size={14} className="text-success mt-0.5 flex-shrink-0" />
-                  <span>
-                    {userType === 'child' ?'Ask a grown-up if you need help!' :'Review content before publishing'
-                    }
-                  </span>
-                </li>
-              </ul>
+              
+              <p className="text-sm text-text-secondary font-caption">
+                {uploadProgress}% complete
+              </p>
             </div>
           </div>
-        </div>
-      </main>
-      {/* Upload Progress Overlay */}
-      <UploadProgressOverlay
-        isVisible={showProgressOverlay}
-        progress={uploadProgress}
-        fileName={selectedFiles?.[currentFileIndex]?.name}
-        onCancel={handleUploadCancel}
-        onComplete={handleUploadComplete}
-      />
+        )}
+      </div>
     </div>
   );
 };

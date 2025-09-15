@@ -1,248 +1,257 @@
-import React, { useState, useEffect, useContext } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
-import { UserContext } from '../../components/ui/Header';
-import Header from '../../components/ui/Header';
+import React, { useState, useEffect } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../contexts/AuthContext';
+import { videoService, videoStorageService } from '../../services/videoService';
 import VideoPlayer from './components/VideoPlayer';
 import VideoInfo from './components/VideoInfo';
 import RelatedVideosSidebar from './components/RelatedVideosSidebar';
-import Icon from '../../components/AppIcon';
+import SafetyOverlay from './components/SafetyOverlay';
 import Button from '../../components/ui/Button';
+import Icon from '../../components/AppIcon';
 
 const VideoPlayerPage = () => {
-  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { userType, safetyStatus } = useContext(UserContext);
+  const navigate = useNavigate();
+  const { user, userProfile } = useAuth();
+  const videoId = searchParams?.get('id');
   
-  const [currentVideo, setCurrentVideo] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [showMobileInfo, setShowMobileInfo] = useState(false);
+  const [video, setVideo] = useState(null);
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [relatedVideos, setRelatedVideos] = useState([]);
+  const [userReaction, setUserReaction] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [showSafetyOverlay, setShowSafetyOverlay] = useState(false);
 
-  // Mock video data - in real app this would come from API/props
-  const mockVideos = {
-    'vid-001': {
-      id: 'vid-001',
-      title: "My Pet Dog\'s Funny Tricks",
-      description: `Watch my dog Max do amazing tricks! He can sit, roll over, play dead, and even fetch my slippers. \n\nI taught him these tricks over the summer with lots of treats and patience. Max is a Golden Retriever and he's 3 years old. \n\nDo you have a pet? What tricks can they do? Let me know in the comments!`,
-      videoSrc: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-      poster: "https://images.pexels.com/photos/1108099/pexels-photo-1108099.jpeg?auto=compress&cs=tinysrgb&w=800",
-      category: "creative",
-      tags: ["pets", "dogs", "tricks", "funny", "animals"],
-      uploadDate: new Date(2025, 8, 10),
-      duration: "3:24",
-      views: 156,
-      likes: 23,
-      creator: "Emma (Age 8)",
-      contentWarnings: []
-    },
-    'vid-002': {
-      id: 'vid-002',
-      title: "Learning Colors with Playdough",
-      description: `Let's learn colors together using colorful playdough! \n\nIn this video, I'll show you how to make different colors by mixing playdough together. We'll make purple by mixing red and blue, green by mixing yellow and blue, and orange by mixing red and yellow. \n\nThis is a fun way to learn about primary and secondary colors!`,
-      videoSrc: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
-      poster: "https://images.pexels.com/photos/1148998/pexels-photo-1148998.jpeg?auto=compress&cs=tinysrgb&w=800",
-      category: "educational",
-      tags: ["learning", "colors", "playdough", "education", "art"],
-      uploadDate: new Date(2025, 8, 8),
-      duration: "5:12",
-      views: 243,
-      likes: 45,
-      creator: "Alex (Age 7)",
-      contentWarnings: ["educational_content"]
-    }
-  };
-
+  // Load video data
   useEffect(() => {
-    // Get video ID from URL params or default to first video
-    const videoId = searchParams?.get('v') || 'vid-001';
-    const video = mockVideos?.[videoId];
-    
-    if (video) {
-      setCurrentVideo(video);
-    } else {
-      // If video not found, redirect to gallery
+    if (!videoId) {
       navigate('/video-gallery');
       return;
     }
-    
-    setIsLoading(false);
-  }, [searchParams, navigate]);
 
-  const handleVideoSelect = (video) => {
-    setCurrentVideo(video);
-    // Update URL without page reload
-    window.history?.pushState({}, '', `/video-player?v=${video?.id}`);
-  };
+    loadVideoData();
+  }, [videoId]);
 
-  const handleVideoEnd = () => {
-    // Auto-play next video or show suggestions
-    console.log('Video ended - could auto-play next video');
-  };
+  const loadVideoData = async () => {
+    try {
+      setLoading(true);
+      setError(null);
 
-  const handleLike = (isLiked) => {
-    if (currentVideo) {
-      setCurrentVideo(prev => ({
-        ...prev,
-        likes: prev?.likes + (isLiked ? 1 : -1)
-      }));
+      // Load video metadata
+      const videoData = await videoService?.getVideoById(videoId);
+      setVideo(videoData);
+
+      // Check if user can view this content
+      if (!canUserViewVideo(videoData)) {
+        setShowSafetyOverlay(true);
+        return;
+      }
+
+      // Get signed URL for video file
+      if (videoData?.file_path) {
+        const signedUrl = await videoStorageService?.getVideoUrl(videoData?.file_path, 7200); // 2 hours
+        setVideoUrl(signedUrl);
+      }
+
+      // Load user's reaction if authenticated
+      if (user) {
+        try {
+          const reaction = await videoService?.getUserReaction(videoId, user?.id);
+          setUserReaction(reaction);
+        } catch (err) {
+          // Non-critical error, user might not have reacted
+          console.log('No user reaction found');
+        }
+      }
+
+      // Load related videos
+      const relatedData = await videoService?.getPublishedVideos({
+        category: videoData?.category,
+        limit: 8
+      });
+      
+      // Filter out current video from related videos
+      const filtered = relatedData?.videos?.filter(v => v?.id !== videoId) || [];
+      setRelatedVideos(filtered);
+
+      // Record view
+      if (user) {
+        await videoService?.recordView(videoId, user?.id);
+      }
+
+    } catch (err) {
+      setError(err?.message);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleShare = (shareType) => {
-    if (shareType === 'copy') {
-      navigator.clipboard?.writeText(window.location?.href);
-      alert('Link copied! Share it with someone you trust.');
-    } else {
-      alert(`Sharing with ${shareType}! Remember to only share with people you know.`);
+  const canUserViewVideo = (videoData) => {
+    if (!videoData || !userProfile) return false;
+
+    // Check if video is published and approved
+    if (videoData?.status !== 'published' || videoData?.approval_status !== 'approved') {
+      return false;
+    }
+
+    // Check content rating vs user age
+    const userAge = userProfile?.age || 0;
+    switch (videoData?.content_rating) {
+      case 'all_ages':
+        return true;
+      case 'ages_3_plus':
+        return userAge >= 3 || userProfile?.role === 'parent' || userProfile?.role === 'admin';
+      case 'ages_6_plus':
+        return userAge >= 6 || userProfile?.role === 'parent' || userProfile?.role === 'admin';
+      case 'ages_12_plus':
+        return userAge >= 12 || userProfile?.role === 'parent' || userProfile?.role === 'admin';
+      case 'parental_guidance':
+        return userProfile?.role === 'parent' || userProfile?.role === 'admin';
+      default:
+        return false;
     }
   };
 
-  if (isLoading) {
+  const handleReaction = async (reactionType) => {
+    if (!user || !video) return;
+
+    try {
+      const result = await videoService?.toggleReaction(video?.id, user?.id, reactionType);
+      
+      if (result?.action === 'removed') {
+        setUserReaction(null);
+        setVideo(prev => ({
+          ...prev,
+          like_count: Math.max(0, (prev?.like_count || 0) - 1)
+        }));
+      } else {
+        setUserReaction(result?.reactionType);
+        if (result?.action === 'added') {
+          setVideo(prev => ({
+            ...prev,
+            like_count: (prev?.like_count || 0) + 1
+          }));
+        }
+      }
+    } catch (err) {
+      setError(`Failed to update reaction: ${err?.message}`);
+    }
+  };
+
+  const handleViewProgress = async (currentTime, duration) => {
+    if (!user || !video) return;
+
+    const watchDuration = Math.floor(currentTime);
+    const completed = currentTime >= duration * 0.9; // 90% watched = completed
+
+    try {
+      await videoService?.updateViewProgress(video?.id, user?.id, watchDuration, completed);
+    } catch (err) {
+      console.error('Failed to update view progress:', err);
+    }
+  };
+
+  // Loading state
+  if (loading) {
     return (
-      <div className="min-h-screen bg-background">
-        <Header />
-        <div className="flex items-center justify-center h-96">
-          <div className="text-center">
-            <div className="w-16 h-16 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-            <p className="text-text-secondary font-caption">Loading your video...</p>
-          </div>
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-primary mx-auto mb-4"></div>
+          <p className="text-text-secondary font-caption">Loading video...</p>
         </div>
       </div>
     );
   }
 
-  if (!currentVideo) {
+  // Error state
+  if (error || !video) {
     return (
-      <div className="min-h-screen bg-background">
-        <Header />
-        <div className="flex items-center justify-center h-96">
-          <div className="text-center">
-            <div className="w-16 h-16 bg-error/20 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Icon name="AlertTriangle" size={32} className="text-error" />
-            </div>
-            <h2 className="text-xl font-heading text-foreground mb-2">Video Not Found</h2>
-            <p className="text-text-secondary font-caption mb-4">
-              Oops! We couldn't find that video.
-            </p>
-            <Button
-              variant="default"
-              size="lg"
-              onClick={() => navigate('/video-gallery')}
-              iconName="ArrowLeft"
-              iconPosition="left"
-              iconSize={18}
-              className="child-friendly-button"
-            >
-              Back to Gallery
-            </Button>
-          </div>
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center max-w-md mx-auto px-4">
+          <Icon name="AlertCircle" size={64} className="text-error mx-auto mb-4" />
+          <h2 className="text-xl font-heading font-bold text-foreground mb-2">
+            Video Not Found
+          </h2>
+          <p className="text-text-secondary font-caption mb-6">
+            {error || 'The video you are looking for does not exist or has been removed.'}
+          </p>
+          <Button
+            onClick={() => navigate('/video-gallery')}
+            iconName="ArrowLeft"
+            iconPosition="left"
+          >
+            Back to Gallery
+          </Button>
         </div>
       </div>
+    );
+  }
+
+  // Safety overlay for restricted content
+  if (showSafetyOverlay) {
+    return (
+      <SafetyOverlay
+        video={video}
+        userProfile={userProfile}
+        onClose={() => navigate('/video-gallery')}
+        onParentApproval={() => {
+          setShowSafetyOverlay(false);
+          loadVideoData();
+        }}
+      />
     );
   }
 
   return (
     <div className="min-h-screen bg-background">
-      <Header />
-      <main className="container mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Back Navigation */}
-        <div className="mb-6">
-          <Button
-            variant="ghost"
-            size="default"
-            onClick={() => navigate('/video-gallery')}
-            iconName="ArrowLeft"
-            iconPosition="left"
-            iconSize={18}
-            className="child-friendly-button hover:bg-muted"
-          >
-            Back to Videos
-          </Button>
-        </div>
-
-        {/* Main Content */}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Video Player and Info - Left Column */}
+          {/* Main Video Section */}
           <div className="lg:col-span-2 space-y-6">
             {/* Video Player */}
-            <VideoPlayer
-              videoSrc={currentVideo?.videoSrc}
-              poster={currentVideo?.poster}
-              title={currentVideo?.title}
-              contentWarnings={currentVideo?.contentWarnings}
-              onVideoEnd={handleVideoEnd}
-              className="w-full"
-            />
-
-            {/* Mobile Info Toggle */}
-            <div className="lg:hidden">
-              <Button
-                variant="outline"
-                size="default"
-                onClick={() => setShowMobileInfo(!showMobileInfo)}
-                iconName={showMobileInfo ? "ChevronUp" : "ChevronDown"}
-                iconPosition="right"
-                iconSize={18}
-                fullWidth
-                className="child-friendly-button"
-              >
-                Video Info
-              </Button>
+            <div className="bg-surface rounded-2xl overflow-hidden shadow-soft">
+              {videoUrl ? (
+                <VideoPlayer
+                  src={videoUrl}
+                  poster={video?.thumbnail_path ? 
+                    videoStorageService?.getThumbnailUrl(video?.thumbnail_path) : 
+                    null
+                  }
+                  onProgress={handleViewProgress}
+                  userRole={userProfile?.role}
+                  parentalControls={userProfile?.parental_controls}
+                />
+              ) : (
+                <div className="aspect-video bg-muted flex items-center justify-center">
+                  <div className="text-center">
+                    <Icon name="VideoOff" size={48} className="text-text-secondary mx-auto mb-2" />
+                    <p className="text-text-secondary font-caption">Video not available</p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Video Info */}
-            <div className={`${showMobileInfo ? 'block' : 'hidden'} lg:block`}>
-              <VideoInfo
-                title={currentVideo?.title}
-                description={currentVideo?.description}
-                category={currentVideo?.category}
-                tags={currentVideo?.tags}
-                uploadDate={currentVideo?.uploadDate}
-                duration={currentVideo?.duration}
-                views={currentVideo?.views}
-                likes={currentVideo?.likes}
-                onLike={handleLike}
-                onShare={handleShare}
-              />
-            </div>
+            <VideoInfo
+              video={video}
+              userReaction={userReaction}
+              onReaction={handleReaction}
+              userProfile={userProfile}
+            />
           </div>
 
-          {/* Related Videos Sidebar - Right Column */}
+          {/* Sidebar */}
           <div className="lg:col-span-1">
             <RelatedVideosSidebar
-              currentVideoId={currentVideo?.id}
-              onVideoSelect={handleVideoSelect}
-              className="sticky top-6"
+              videos={relatedVideos}
+              currentVideoId={video?.id}
+              userRole={userProfile?.role}
+              userAge={userProfile?.age}
             />
           </div>
         </div>
-
-        {/* Safety Footer */}
-        <div className="mt-12 p-6 bg-success/10 border border-success/20 rounded-xl">
-          <div className="flex items-center justify-center space-x-3 mb-4">
-            <Icon name="ShieldCheck" size={24} className="text-success" />
-            <h3 className="text-lg font-heading text-success">Safe Viewing</h3>
-          </div>
-          <div className="text-center space-y-2">
-            <p className="text-success font-caption">
-              All videos on KidsVidShare are checked to make sure they're safe and appropriate for children.
-            </p>
-            <div className="flex items-center justify-center space-x-4 text-sm text-success/80 font-caption">
-              <div className="flex items-center space-x-1">
-                <Icon name="Eye" size={14} />
-                <span>Content Reviewed</span>
-              </div>
-              <div className="flex items-center space-x-1">
-                <Icon name="Users" size={14} />
-                <span>Parent Supervised</span>
-              </div>
-              <div className="flex items-center space-x-1">
-                <Icon name="Heart" size={14} />
-                <span>Kid Friendly</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </main>
+      </div>
     </div>
   );
 };
